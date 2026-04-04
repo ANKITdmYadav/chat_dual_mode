@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from pymongo import MongoClient
-client=MongoClient("mongodb+srv://ankityaduvansh1rao9818_db_user:Yadankit98@cluster0.uj5am6l.mongodb.net")
+client=MongoClient(os.getenv("MONGO_URI"))
 db=client["chat_db"]
 collection=db["history"]
 
@@ -257,6 +257,3 @@ else:
     st.warning("Please enter the Groq API Key")
 
 
-
-# I made this bcz many times we ask que and donot open that chat again 
-# So must be an option to save or delete chats
