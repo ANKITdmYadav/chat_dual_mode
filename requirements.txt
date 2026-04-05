@@ -14,3 +14,5 @@ sentence-transformers
 pypdf
 huggingface-hub
 protobuf==3.20.3
+ragas
+dataset
