@@ -11,7 +11,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
-
+from evaluate_rag import run_evaluation
 import os
 
 from dotenv import load_dotenv
@@ -40,6 +40,63 @@ def inspect(state):
 
 user_input=""
 on = st.toggle("Save chat history feature")
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+def build_rag_chain(llm, retriever):
+    contextualize_q_prompt = ChatPromptTemplate.from_messages([
+        ("system", "Given a chat history and the latest user question, formulate a standalone question. Do NOT answer it."),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+    contextualize_chain = contextualize_q_prompt | llm | StrOutputParser()
+
+    qa_prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are an assistant for question-answering tasks. Use the context below to answer. "
+                   "Answer in 50-60 words, if necessary explain more. If you don't know, say you don't know.\n\n{context}"),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+
+    rag_chain = (
+        RunnablePassthrough.assign(
+            context=lambda x: contextualize_chain | retriever | format_docs
+        )
+        | RunnableLambda(inspect)
+        | qa_prompt
+        | llm
+        | StrOutputParser()
+    )
+    return rag_chain
+
+def build_vectorstore(uploaded_files):
+    documents = []
+    for uploaded_file in uploaded_files:
+        temppdf = "./temp.pdf"
+        with open(temppdf, "wb") as file:
+            file.write(uploaded_file.getvalue())
+        loader = PyPDFLoader(temppdf)
+        documents.extend(loader.load())
+    splits = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500).split_documents(documents)
+    vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
+    return vectorstore.as_retriever()
+
+def evaluate_rag_pipeline(retriever, llm):
+    with st.spinner("Running RAGAS evaluation..."):
+        scores, rows = run_evaluation(retriever, llm)
+
+    st.subheader("RAGAS Scores")
+    st.dataframe(scores.to_pandas())
+
+    with st.expander("View per question results"):
+        for row in rows:
+            st.write(f"**Q:** {row['question']}")
+            st.write(f"**A:** {row['answer']}")
+            st.write(f"**Ground Truth:** {row['reference']}")
+            st.divider()
+
+
 if api_key and not on:
     llm = ChatGroq(groq_api_key=api_key, model_name="llama-3.1-8b-instant")
 
@@ -47,72 +104,21 @@ if api_key and not on:
     if 'store' not in st.session_state:
         st.session_state.store = {}
 
+    def get_session_history(session: str) -> BaseChatMessageHistory:
+        if session not in st.session_state.store:
+            st.session_state.store[session] = ChatMessageHistory()
+        return st.session_state.store[session]
+
+
     uploaded_files = st.file_uploader("Choose PDF files", type="pdf", accept_multiple_files=True)
     
     if uploaded_files:
-        documents = []
-        for uploaded_file in uploaded_files:
-            temppdf = "./temp.pdf"
-            with open(temppdf, "wb") as file:
-                file.write(uploaded_file.getvalue())
-            loader = PyPDFLoader(temppdf)
-            documents.extend(loader.load())
-
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
-        splits = text_splitter.split_documents(documents)
-        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-        retriever = vectorstore.as_retriever()
-
-        # --- LCEL REORGANIZATION START ---
-
-        def format_docs(docs):
-            return "\n\n".join(doc.page_content for doc in docs)
-
-        contextualize_q_system_prompt = (
-            "Given a chat history and the latest user question, "
-            "formulate a standalone question. Do NOT answer it."
-        )
-        contextualize_q_prompt = ChatPromptTemplate.from_messages([
-            ("system", contextualize_q_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-        
-        contextualize_chain = contextualize_q_prompt | llm | StrOutputParser()
-
-        qa_system_prompt = (
-            "You are an assistant for question-answering tasks. Use the context below to answer. "
-            "If you don't know, say you don't know. Max 3 sentences.\n\n{context}"
-        )
-        qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", qa_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-
-        rag_chain = (
-            RunnablePassthrough.assign(
-                context=lambda x: contextualize_chain | retriever | format_docs
-            )
-            | RunnableLambda(inspect)      
-            | qa_prompt
-            | llm
-            | StrOutputParser()
-        )
-
-        # --- LCEL REORGANIZATION END ---
-
-        def get_session_history(session: str) -> BaseChatMessageHistory:
-            if session not in st.session_state.store:
-                st.session_state.store[session] = ChatMessageHistory()
-            return st.session_state.store[session]
-
+        retriever = build_vectorstore(uploaded_files)
+        rag_chain = build_rag_chain(llm, retriever)
 
         conversational_rag_chain = RunnableWithMessageHistory(
-            rag_chain,
-            get_session_history,
-            input_messages_key="input",
-            history_messages_key="chat_history",
+            rag_chain, get_session_history,
+            input_messages_key="input", history_messages_key="chat_history",
         )
 
         user_input = st.text_input("Your question:")
@@ -128,14 +134,18 @@ if api_key and not on:
             with st.expander("View Message History"):
                 for msg in session_history.messages:
                     st.write(f"{msg.type}: {msg.content}")
+    
+        st.divider()
+
+        if st.button("Evaluate RAG"):
+            evaluate_rag_pipeline(retriever, llm)
 
 elif api_key and on:
+    llm = ChatGroq(groq_api_key=api_key, model_name="llama-3.1-8b-instant")
+
     def session_exist(session_id):
         user = collection.find_one({"session_id": session_id})
-
-        if user:
-            return True
-        return False
+        return True if user else False
     
     def save_message(session_id, role, content):
         collection.update_one(
@@ -156,80 +166,27 @@ elif api_key and on:
                     history.add_message(AIMessage(content=msg["content"]))
         return history
     
-    llm = ChatGroq(groq_api_key=api_key, model_name="llama-3.1-8b-instant")
     
     session_id = st.text_input("Session ID")
     if not session_id:
         st.info("Session ID cannot be empty ")
+        st.stop()
     if not session_exist(session_id=session_id):
         st.info("No Session exist ")
         st.button("Create new session")
+        # st.stop()
     else:
         st.info("Session found")
        
-
-    print("Session ID:", session_id)
-
-    if 'store' not in st.session_state:
-        st.session_state.store = {}
-
     uploaded_files = st.file_uploader("Choose PDF files", type="pdf", accept_multiple_files=True)
     
     if uploaded_files:
-        documents = []
-        for uploaded_file in uploaded_files:
-            temppdf = "./temp.pdf"
-            with open(temppdf, "wb") as file:
-                file.write(uploaded_file.getvalue())
-            loader = PyPDFLoader(temppdf)
-            documents.extend(loader.load())
-
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
-        splits = text_splitter.split_documents(documents)
-        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-        retriever = vectorstore.as_retriever()
-
-        def format_docs(docs):
-            return "\n\n".join(doc.page_content for doc in docs)
-
-        contextualize_q_system_prompt = (
-            "Given a chat history and the latest user question, "
-            "formulate a standalone question. Do NOT answer it."
-        )
-        contextualize_q_prompt = ChatPromptTemplate.from_messages([
-            ("system", contextualize_q_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-        
-        contextualize_chain = contextualize_q_prompt | llm | StrOutputParser()
-
-        qa_system_prompt = (
-            "You are an assistant for question-answering tasks. Use the context below to answer. "
-            "Answer ques in 50-60 word and if necessary then explain more"
-            "If you don't know, say you don't know. Max 3 sentences.\n\n{context}"
-        )
-        qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", qa_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-
-        rag_chain = (
-            RunnablePassthrough.assign(
-                context=lambda x: contextualize_chain | retriever | format_docs
-            )
-            | RunnableLambda(inspect)    
-            | qa_prompt
-            | llm
-            | StrOutputParser()
-        )
+        retriever = build_vectorstore(uploaded_files)
+        rag_chain = build_rag_chain(llm, retriever)
 
         conversational_rag_chain = RunnableWithMessageHistory(
-            rag_chain,
-            get_history,
-            input_messages_key="input",
-            history_messages_key="chat_history",
+            rag_chain, get_history,
+            input_messages_key="input", history_messages_key="chat_history",
         )
 
         raw_data = collection.find_one({"session_id": session_id})
@@ -249,9 +206,13 @@ elif api_key and on:
             )
 
             st.write("Assistant:", response_text)
-            save_message(session_id, "assistant", response_text)
-            # history = get_history(session_id)
-           
+            save_message(session_id, "assistant", response_text)           
+        
+        
+        st.divider()
+        if st.button("Evaluate RAG"):
+            evaluate_rag_pipeline(retriever, llm)
+
 
 else:
     st.warning("Please enter the Groq API Key")
