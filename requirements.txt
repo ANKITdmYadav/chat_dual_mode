@@ -15,4 +15,6 @@ pypdf
 huggingface-hub
 protobuf==3.20.3
 ragas
-dataset
+datasets==2.14.6
+pyarrow==14.0.1
+
