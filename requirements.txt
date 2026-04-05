@@ -1,11 +1,11 @@
+langchain==0.3.23
+langchain-community==0.3.21
+langchain-core==0.3.55
+langchain-text-splitters==0.3.8
 
-langchain
-langchain-community
-langchain-core
 langchain-groq
 langchain-huggingface
 langchain-chroma
-langchain-text-splitters
 pymongo
 python-dotenv
 streamlit
