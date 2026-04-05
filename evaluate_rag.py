@@ -1,12 +1,3 @@
-from datasets import Dataset
-from ragas import evaluate
-from ragas.metrics import (
-    answer_correctness,
-    answer_relevancy,
-    faithfulness,
-    context_precision,
-    context_recall,
-)
 
 questions = [
     "What is the Transformer model architecture based on?",
@@ -25,6 +16,20 @@ ground_truths = [
 ]
 
 def run_evaluation(retriever, llm):
+    from datasets import Dataset
+    from ragas import evaluate
+    from ragas.metrics import (
+        answer_correctness,
+        answer_relevancy,
+        faithfulness,
+        context_precision,
+        context_recall,
+    )
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+    from langchain_openai import ChatOpenAI
+    from langchain_huggingface import HuggingFaceEmbeddings
+    
     def retrieve(question, k=2):
         docs = retriever.invoke(question)[:k]
         return [doc.page_content for doc in docs]
